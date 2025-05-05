@@ -11,9 +11,9 @@ Press the server name in the top left corner of the screen, and go to 'Server Se
 
 ## Step 2: Set up the Chat Forwarder
 
-Download the chat forwarder.
+Open the list of releases by clicking on 'Releases' on the right side of the GitHub page. Download the latest release by clicking on 'Source code (zip)'.
 
-Move the chat forwarder to a folder where you won't lose it, and start it.
+Unzip `New Horizons Chat Forwarder.exe` to a folder where you won't lose it, and start it.
 
 From the Discord Integrations window, copy the link of the Discord webhook and paste it into the chat forwarder. Press Enter.
 
