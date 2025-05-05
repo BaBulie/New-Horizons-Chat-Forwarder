@@ -19,7 +19,9 @@
 """
 
 import os
+import sys
 import json
+import ctypes
 import uvicorn
 import requests
 import argparse
@@ -90,6 +92,15 @@ async def forwarder(sender: str = Query(...), message: str = Query(...)):
     return {"status": "forwarded"}
 
 
+# --- Run minimized ---
+def minimize_console():
+    if sys.platform == "win32":
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if hwnd:
+            SW_MINIMIZE = 6
+            ctypes.windll.user32.ShowWindow(hwnd, SW_MINIMIZE)
+
+
 # --- Main Entrypoint ---
 def main():
     # Welcome message
@@ -127,10 +138,13 @@ def main():
     parser = argparse.ArgumentParser(description="Forwards chat messages from Conan Exiles to a Discord webhook.")
     parser.add_argument("--host", default="127.0.0.1", help="Listen address")
     parser.add_argument("--port", type=int, default=8000, help="HTTP port")
+    parser.add_argument("--minimized", action="store_true", help="Start the console minimized")
     args = parser.parse_args()
 
     host = args.host
     port = args.port
+    if args.minimized:
+        minimize_console()
 
     # Ensure webhook URL is set
     webhook_url = load_config()
