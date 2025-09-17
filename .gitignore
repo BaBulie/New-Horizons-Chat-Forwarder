@@ -3,3 +3,6 @@
 
 # ICON FILES #
 *.ico
+
+# JSON FILES #
+*.json
