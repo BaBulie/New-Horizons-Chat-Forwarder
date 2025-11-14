@@ -29,19 +29,28 @@ import uvicorn
 import requests
 import argparse
 import threading
+from pathlib import Path
 from datetime import datetime
 from termcolor import colored
 from fastapi import FastAPI, Query
+from typing import Iterable, Optional
 
 
 # --- Version ---
-__version__ = "1.1"
+__version__ = "1.2"
 
 
 # --- Config Constants ---
 CONFIG_FILE = "config.json"
-WEBHOOK_PREFIX = "https://discord.com/api/webhooks/"
+WEBHOOK_PREFIXES = (
+    "https://discord.com/api/webhooks/",
+    "https://discordapp.com/api/webhooks/",
+)
 USER_AGENT = f"NH-Chat-Forwader/{__version__} (+https://github.com/BaBulie/New-Horizons-Chat-Forwarder)"
+
+
+# --- Cached runtime webhook URL ---
+WEBHOOK_URL_CACHE: Optional[str] = None
 
 
 # --- Termcolor Helper ---
@@ -51,20 +60,80 @@ def colored_text(text_parts, colors):
 
 
 # --- Config Functions ---
+def is_valid_webhook_prefix(url: str) -> bool:
+    return any(url.startswith(prefix) for prefix in WEBHOOK_PREFIXES)
+
+
+def get_webhook_url() -> str:
+    global WEBHOOK_URL_CACHE
+    if WEBHOOK_URL_CACHE is None:
+        WEBHOOK_URL_CACHE = load_config()
+    return WEBHOOK_URL_CACHE
+
+
+def _config_candidates() -> Iterable[Path]:
+    # Same folder as the executable
+    try:
+        if getattr(sys, "frozen", False):
+            exe_dir = Path(sys.executable).resolve().parent
+            yield exe_dir / CONFIG_FILE
+    except Exception:
+        pass
+    yield Path(__file__).resolve().parent / CONFIG_FILE
+
+    # %APPDATA%\New-Horizons-Chat-Forwarder\config.json
+    appdata = os.getenv("APPDATA")
+    if appdata:
+        yield Path(appdata) / "New-Horizons-Chat-Forwarder" / CONFIG_FILE
+
+    # User's home config
+    yield Path.home() / ".config" / "new-horizons-chat-forwarder" / CONFIG_FILE
+
+
 def load_config() -> str:
-    if os.path.exists(CONFIG_FILE):
+    for cfg_path in _config_candidates():
         try:
-            with open(CONFIG_FILE, "r") as f:
-                data = json.load(f)
-            return data.get("discord_webhook_url", "")
-        except (ValueError, json.JSONDecodeError):
-            pass
+            print(colored_text(["INFO", ":     Checking config at ", str(cfg_path)],
+                               ["green", "light_grey", "light_magenta"]))
+            if cfg_path.exists():
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                url = data.get("discord_webhook_url", "")
+                print(colored_text(["INFO", ":     Loaded config from ", str(cfg_path)],
+                                   ["green", "light_grey", "light_magenta"]))
+                return url
+        except Exception as e:
+            print(colored_text(["ERROR", ":    Failed to read ", str(cfg_path), " -> ", str(e)],
+                               ["red", "light_grey", "light_grey", "light_grey", "light_grey"]))
     return ""
 
 
 def save_config(url: str) -> None:
-    with open(CONFIG_FILE, "w") as f:
-        json.dump({"discord_webhook_url": url}, f, indent=2)
+    last_exc = None
+    for cfg_path in _config_candidates():
+        try:
+            parent = cfg_path.parent
+            if not parent.exists():
+                parent.mkdir(parents=True, exist_ok=True)
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump({"discord_webhook_url": url}, f, ensure_ascii=False, indent=2)
+            global WEBHOOK_URL_CACHE
+            WEBHOOK_URL_CACHE = url
+            print(colored_text(["INFO", ":     Webhook URL saved to ", str(cfg_path)],
+                               ["green", "light_grey", "light_magenta"]))
+            return
+        except Exception as e:
+            last_exc = e
+            print(colored_text(["WARNING", ":  Could not write to ", str(cfg_path), " -> ", str(e)],
+                               ["yellow", "light_grey", "light_magenta", "light_grey", "light_grey"]))
+            continue
+
+    # If nothing was writeable
+    print(colored_text(["ERROR", ":    Failed to save config anywhere."],
+                       ["red", "light_grey"]))
+    if last_exc:
+        print(colored_text(["ERROR", ":    Last error: ", str(last_exc)],
+                           ["red", "light_grey", "light_grey"]))
 
 
 def prompt_for_webhook() -> str:
@@ -72,13 +141,11 @@ def prompt_for_webhook() -> str:
                        ["yellow", "light_grey"]))
     while True:
         url = input("          Enter your Discord webhook URL: ").strip()
-        if url.startswith(WEBHOOK_PREFIX):
+        if is_valid_webhook_prefix(url):
             save_config(url)
-            print(colored_text(["INFO", ":     Webhook URL saved to ", CONFIG_FILE, "."],
-                       ["green", "light_grey", "light_magenta", "light_grey"]))
             return url
-        print(colored_text(["WARNING", ":  Invalid URL. Must start with ", WEBHOOK_PREFIX, "...", " Please try again."],
-                       ["yellow", "light_grey", "light_magenta", "light_magenta", "light_grey"]))
+        print(colored_text(["WARNING", ":  Invalid URL. Must start with one of: ", "... ".join(WEBHOOK_PREFIXES), "...", " Please try again."],
+                       ["yellow", "light_grey", "light_magenta", "light_magenta", "light_grey", "light_grey"]))
 
 
 # --- Rate Limiting / Queueing ---
@@ -128,7 +195,6 @@ def send_to_discord(url: str, content: str):
 def worker_loop():
     global WORKER_RUNNING
     WORKER_RUNNING = True
-    url = load_config()
     base_spacing = 0.45     # ~5 req / 2s
     backoff = 0.0
 
@@ -138,6 +204,7 @@ def worker_loop():
         except queue.Empty:
             continue
         try:
+            url = get_webhook_url()
             reset_after = send_to_discord(url, content)
             spacing = base_spacing
             if reset_after:
@@ -156,10 +223,10 @@ app = FastAPI()
 
 @app.get("/webhook")
 async def forwarder(sender: str = Query(...), message: str = Query(...)):
-    url = load_config()
-    if not url.startswith(WEBHOOK_PREFIX):
-        print(colored_text(["ERROR", ":    ", "Discord webhook not configured correctly."],
-                           ["red", "light_grey", "light_grey"]))
+    url = get_webhook_url()
+    if not is_valid_webhook_prefix(url):
+        print(colored_text(["ERROR", ":    Discord webhook not configured correctly."],
+                           ["red", "light_grey"]))
         return {"status": "error", "detail": "Discord webhook not configured correctly."}
     
     timestamp = datetime.now().strftime("%H:%M")
@@ -174,8 +241,8 @@ async def forwarder(sender: str = Query(...), message: str = Query(...)):
     try:
         SEND_QUEUE.put_nowait(content)
     except queue.Full:
-        print(colored_text(["ERROR", ":    ", "Queue full! Message discarded."],
-                           ["red", "light_grey", "light_grey"]))
+        print(colored_text(["ERROR", ":    Queue full! Message discarded."],
+                           ["red", "light_grey"]))
         return {"status": "error", "detail": "Queue full! Message discarded."}
     
     return {"status": "queued"}
@@ -236,8 +303,8 @@ def main():
         minimize_console()
 
     # Ensure webhook URL is set
-    webhook_url = load_config()
-    if not webhook_url.startswith(WEBHOOK_PREFIX):
+    webhook_url = get_webhook_url()
+    if not is_valid_webhook_prefix(webhook_url):
         webhook_url = prompt_for_webhook()
     
     # Start the background sender worker
@@ -250,7 +317,7 @@ def main():
     try:
         uvicorn.run(app, host=host, port=port, log_level="info")
     except OSError as e:
-        print(colored_text(["ERROR", ":    ", e],
+        print(colored_text(["ERROR", ":    ", str(e)],
                            ["red", "light_grey", "light_grey"]))
     finally:
         input("Press Enter to exit...")
